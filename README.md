@@ -1,2 +1,4 @@
 # unsupervised_3d_pose
 Unsupervised 3D Human Pose Estimation on Human3.6M
+
+<img width="300" height="300" src="https://github.com/lyuheng/unsupervised_3d_pose/blob/master/final.gif"/>
