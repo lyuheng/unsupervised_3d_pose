@@ -242,7 +242,7 @@ class H36M(data.Dataset):
             proj = proj.reshape(-1, self.N * 2)  # shape=(length, 2*n_joints)
             proj = normalize_2d(proj)
             proj = proj.astype(np.float32)
-            return proj, X,             scale
+            return proj, X, scale
 
     def __len__(self):
         return len(self.data_list)
