@@ -49,9 +49,9 @@ parser.add_argument('--length', default=5, type=int,
 parser.add_argument('--verbose', default=False, type=str_to_bool, nargs='?',
                     help = 'show detailed loss')
 # Evaluation
-parser.add_argument('--eval_interval', default=500, type=int, 
+parser.add_argument('--eval_interval', default=1000, type=int, 
                     help='evaluation interval')
-parser.add_argument('--eval_dir', default='/home/lyuheng/vision/unsupervised_3d_pose_lift/eval',
+parser.add_argument('--eval_dir', default='/home/lyuheng/vision/unsupervised_3d_pose_lift/eval2',
                     help='path to evaluation')
 
 args = parser.parse_args()
@@ -67,6 +67,7 @@ def load_model(L, D, T, path):
     L.load_state_dict(state['state_dict_L'])
     D.load_state_dict(state['state_dict_D'])
     T.load_state_dict(state['state_dict_T'])
+
 
 def compute_gradient_penalty(D, xy_real, xy_fake, lamda, device):
     batch_sz = xy_real.size(0)
@@ -108,22 +109,25 @@ def main():
     optim_D = optim.Adam(D.parameters(), lr=args.disc_lr)
     optim_T = optim.Adam(T.parameters(), lr=args.disc_lr)
 
+    # use 2D results from Stack Hourglass Net
     train_loader = data.DataLoader(
         H36M(length=args.length, action='all', is_train=True, use_sh_detection=True),
-        batch_size = 1024,
+        batch_size=1024,
         shuffle=True,
         pin_memory=True,
     )
 
     test_loader = data.DataLoader(
         H36M(length=1, action='all', is_train=False, use_sh_detection=True),
-        batch_size=1,
+        batch_size=512,
         shuffle=False,
     )
 
     # Logger
-    logger = Logger(osp.join(args.checkpoint, 'log_wgan_gp.txt'), title='Human3.6M')
+    logger = Logger(osp.join(args.checkpoint, 'log.txt'), title='Human3.6M')
+    logger_err = Logger(osp.join(args.checkpoint, 'log_err.txt'), title='Human3.6M MPJPE err')
     logger.set_names(['2d_loss   ', '3d_loss   ', 'adv_loss   ', 'temporal_loss   '])
+    logger_err.set_names(['err'])
 
     for epoch in range(args.epoches):
 
@@ -133,18 +137,20 @@ def main():
 
         logger.append([loss_2d, loss_3d, loss_adv, loss_t])
         
-        if (epoch+1) % args.checkpoint_save_interval == 0:
+        if (epoch + 1) % args.checkpoint_save_interval == 0:
             save_checkpoint({
-                'epoch': epoch+1,
+                'epoch': epoch + 1,
                 'state_dict_L': L.state_dict(),
                 'state_dict_D': D.state_dict(),
                 'state_dict_T': T.state_dict(), 
             }, checkpoint=args.checkpoint)
         
-        if (epoch+1) % args.eval_interval == 0:
-            test(test_loader, L, epoch, device, args)
+        if (epoch + 1) % args.eval_interval == 0:
+            ttl_err = test(test_loader, L, epoch, device, args)
+            logger_err.append([ttl_err])
 
     logger.close()
+    logger_err.close()
 
 
 
@@ -156,6 +162,7 @@ def train(train_loader, L, D, T, optim_L, optim_D, optim_T, epoch, device, args)
 
     batch_time = AverageMeter()
     data_time = AverageMeter()
+
     loss_2ds = AverageMeter()
     loss_3ds = AverageMeter()
     loss_advs = AverageMeter()
@@ -166,6 +173,7 @@ def train(train_loader, L, D, T, optim_L, optim_D, optim_T, epoch, device, args)
     L2_loss = nn.MSELoss(reduction='mean')
 
     for batch_idx, (xy, X, scale) in enumerate(train_loader):
+
         data_time.update(time.time() - end)
         # train D
         D.zero_grad()
@@ -284,29 +292,109 @@ def train(train_loader, L, D, T, optim_L, optim_D, optim_T, epoch, device, args)
 
         return loss_2ds.avg, loss_3ds.avg, loss_advs.avg, loss_ts.avg
 
-# TODO: finish eval
+# TODO: 
 def evaluate():
     pass
 
 def test(test_loader, L, epoch, device, args):
-    
     L.eval()
     if not osp.isdir(args.eval_dir):
         mkdir_p(args.eval_dir)
 
-    for batch_idx, (xy, X, scale) in enumerate(test_loader):
-
-        xy = xy.squeeze(1) # (1,17*2)
+    all_dist = []
+    for batch_idx, (xy, X, ls) in enumerate(test_loader):
+        
+        bs = xy.shape[0]
+        xy = xy.squeeze(1) # (BS,17*2)
         xy = xy.to(device)
-        z_pred = L(xy)
-        x = xy[:, 0::2]
-        y = xy[:, 1::2]
-        joint_3d = torch.cat((x[:,:,None], y[:,:,None], z_pred[:,:,None]), dim=2)
-        joint_3d = joint_3d.view(17,3).cpu().detach().numpy()
-        vis = np.ones((17,1))
-        vis_3d_skeleton(joint_3d, vis, path=args.eval_dir, epoch=epoch+1)
 
-        break
+        z_pred = L(xy) # (bs,17)
+
+        pose_3d_t = torch.cat(( xy[:,0::2,None], \
+                                xy[:,1::2,None], \
+                                z_pred[:,:,None]), dim=2)
+
+        pose_3d_t = pose_3d_t.view(-1, 17*3).cpu().detach().numpy()
+        
+        X = X.squeeze(1).numpy()
+        ls = ls.squeeze(1).numpy()
+
+        pose_3d_t[:,0::3] = pose_3d_t[:,0::3] - pose_3d_t[:,0][:,None]
+        pose_3d_t[:,1::3] = pose_3d_t[:,1::3] - pose_3d_t[:,1][:,None]
+        pose_3d_t[:,2::3] = pose_3d_t[:,2::3] - pose_3d_t[:,2][:,None]
+
+        if batch_idx == 0:
+            vis_3d_skeleton(pose_3d_t[0].reshape(17,3), np.ones((17,1)), epoch=epoch+1)
+        
+        # use Protocal-1
+        # for ba in range(bs):
+        #     gt = X[ba].reshape(-1,3)
+        #     out = pose_3d_t[ba].reshape(-1,3)
+        #     _, Z, T, b, c = get_transformation(gt,out,True)
+        #     out = (b*out.dot(T)) + c
+        #     pose_3d_t[ba, :] = out.reshape(51)
+
+        sqerr = (pose_3d_t - X)**2
+
+        distance = np.zeros((bs, 17))
+        dist_idx = 0
+        for k in range(0, 17*3, 3):
+            distance[:, dist_idx] = np.sqrt(np.sum(sqerr[:,k:k+3],axis=1))*ls
+            dist_idx += 1
+
+        all_dist.append(distance)
+    
+    all_dist = np.vstack(all_dist)
+    ttl_err = np.mean(all_dist)
+
+    return ttl_err
+
+
+def get_transformation(X, Y, compute_optimal_scale=False):
+    muX = X.mean(0)
+    muY = Y.mean(0)
+
+    X0 = X - muX
+    Y0 = Y - muY
+
+    ssX = (X0 ** 2.).sum()
+    ssY = (Y0 ** 2.).sum()
+
+    # centred Frobenius norm
+    normX = np.sqrt(ssX)
+    normY = np.sqrt(ssY)
+
+    # scale to equal (unit) norm
+    X0 = X0 / normX
+    Y0 = Y0 / normY
+
+    # optimum rotation matrix of Y
+    A = np.dot(X0.T, Y0)
+    U, s, Vt = np.linalg.svd(A, full_matrices=False)
+    V = Vt.T
+    T = np.dot(V, U.T)
+
+    # Make sure we have a rotation
+    detT = np.linalg.det(T)
+    V[:, -1] *= np.sign(detT)
+    s[-1] *= np.sign(detT)
+    T = np.dot(V, U.T)
+
+    traceTA = s.sum()
+
+    if compute_optimal_scale:  # Compute optimum scaling of Y.
+        b = traceTA * normX / normY
+        d = 1 - traceTA ** 2
+        Z = normX * traceTA * np.dot(Y0, T) + muX
+    else:  # If no scaling allowed
+        b = 1
+        d = 1 + ssY / ssX - 2 * traceTA * normY / normX
+        Z = normY * np.dot(Y0, T) + muX
+
+    c = muX - b * np.dot(muY, T)
+
+    return d, Z, T, b, c
+
 
 if __name__ == "__main__":
     main()
