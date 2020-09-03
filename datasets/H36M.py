@@ -273,7 +273,7 @@ def normalize_2d(pose):
     """
     xs = pose.T[0::2] - pose.T[0]
     ys = pose.T[1::2] - pose.T[1]
-    pose = pose.T / np.sqrt(xs[1:] ** 2 + ys[1:] ** 2).mean(axis=0)
+    pose = pose.T / np.sqrt(xs[1:] ** 2 + ys[1:] ** 2).mean(axis=0) # if use -v2, multiply 1/c = 0.1 to pose
     mu_x = pose[0].copy()
     mu_y = pose[1].copy()
     pose[0::2] -= mu_x
